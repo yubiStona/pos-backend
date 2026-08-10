@@ -1,0 +1,22 @@
+import { AppDataSource } from '../config/database.js';
+import { User } from '../entities/User.js';
+import { Category } from '../entities/Category.js';
+import { Supplier } from '../entities/Supplier.js';
+import { Product } from '../entities/Product.js';
+import { StockTransaction } from '../entities/StockTransaction.js';
+import { Purchase } from '../entities/Purchase.js';
+import { PurchaseItem } from '../entities/PurchaseItem.js';
+import { Sale } from '../entities/Sale.js';
+import { SaleItem } from '../entities/SaleItem.js';
+import { Setting } from '../entities/Setting.js';
+
+export const getUserRepository = () => AppDataSource.getRepository(User);
+export const getCategoryRepository = () => AppDataSource.getRepository(Category);
+export const getSupplierRepository = () => AppDataSource.getRepository(Supplier);
+export const getProductRepository = () => AppDataSource.getRepository(Product);
+export const getStockTransactionRepository = () => AppDataSource.getRepository(StockTransaction);
+export const getPurchaseRepository = () => AppDataSource.getRepository(Purchase);
+export const getPurchaseItemRepository = () => AppDataSource.getRepository(PurchaseItem);
+export const getSaleRepository = () => AppDataSource.getRepository(Sale);
+export const getSaleItemRepository = () => AppDataSource.getRepository(SaleItem);
+export const getSettingRepository = () => AppDataSource.getRepository(Setting);
