@@ -4,6 +4,9 @@ import helmet from 'helmet';
 import apiRouter from './routes/index.js';
 import { errorHandler } from './middlewares/error.middleware.js';
 import { ENV } from './config/env.js';
+import dotenv from "dotenv";
+
+dotenv.config();
 
 export async function createApp() {
   const app = express();
@@ -18,7 +21,8 @@ export async function createApp() {
     })
   );
 
-  const allowedOrigins =ENV.FRONTEND_URL.split(',').map((o) => o.trim());
+  const allowedOrigins=process.env.FRONTEND_URL;
+  console.log('frontend URL',allowedOrigins);
   app.use(
     cors({
       origin: allowedOrigins,
