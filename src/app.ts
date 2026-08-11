@@ -12,12 +12,13 @@ export async function createApp() {
   app.use(
     helmet({
       contentSecurityPolicy: false, // Allow inline scripts for thermal receipt print views
+      crossOriginResourcePolicy: {
+        policy: "cross-origin",
+      },
     })
   );
 
-  // CORS: allow the deployed frontend origin(s). Set FRONTEND_URL to a
-  // comma-separated list for multiple origins (e.g. prod + local dev).
-  const allowedOrigins = ENV.FRONTEND_URL.split(',').map((o) => o.trim());
+  const allowedOrigins =ENV.FRONTEND_URL.split(',').map((o) => o.trim());
   app.use(
     cors({
       origin: allowedOrigins,
