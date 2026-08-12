@@ -59,20 +59,36 @@ export class ReportController {
   static async exportSalesReport(req: AuthRequest, res: Response, next: NextFunction) {
     try {
       const period = (req.query.period as string) || 'daily';
-      if (!['daily', 'weekly', 'monthly'].includes(period)) {
-        res.status(400).json({ success: false, message: 'period must be daily, weekly, or monthly' });
+      if (!['daily', 'weekly', 'monthly', 'custom'].includes(period)) {
+        res.status(400).json({ success: false, message: 'period must be daily, weekly, monthly, or custom' });
         return;
       }
+
+      const format = ((req.query.format as string) || 'xlsx').toLowerCase();
+      if (!['xlsx', 'pdf'].includes(format)) {
+        res.status(400).json({ success: false, message: 'format must be xlsx or pdf' });
+        return;
+      }
+
       const date = req.query.date as string | undefined;
+      const startDate = req.query.startDate as string | undefined;
+      const endDate = req.query.endDate as string | undefined;
 
-      const { csv, filename } = await ReportService.buildSalesReportCsv(
-        period as 'daily' | 'weekly' | 'monthly',
-        date
+      const periodArg = period as 'daily' | 'weekly' | 'monthly' | 'custom';
+
+      const result =
+        format === 'pdf'
+          ? await ReportService.buildSalesReportPdf(periodArg, date, startDate, endDate)
+          : await ReportService.buildSalesReportXlsx(periodArg, date, startDate, endDate);
+
+      res.setHeader(
+        'Content-Type',
+        format === 'pdf'
+          ? 'application/pdf'
+          : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       );
-
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.send(csv);
+      res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+      res.send(result.buffer);
     } catch (error) {
       next(error);
     }

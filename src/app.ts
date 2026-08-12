@@ -8,6 +8,7 @@ import { ENV } from './config/env.js';
 export async function createApp() {
   const app = express();
 
+  // Security & Parsing
   app.use(
     helmet({
       contentSecurityPolicy: false, // Allow inline scripts for thermal receipt print views

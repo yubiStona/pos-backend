@@ -3,6 +3,9 @@ import { Sale } from '../entities/Sale.js';
 import { SaleItem } from '../entities/SaleItem.js';
 import { Product } from '../entities/Product.js';
 import { Purchase } from '../entities/Purchase.js';
+import { AppError } from '../middlewares/error.middleware.js';
+import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 
 function resolveDateRange(startDate?: string, endDate?: string) {
   const start = startDate ? new Date(startDate) : undefined;
@@ -241,12 +244,36 @@ export class ReportService {
   }
 
   /**
-   * Resolves a daily/weekly/monthly window around a reference date.
+   * Resolves a daily/weekly/monthly/custom window.
    * - daily: the reference date only
    * - weekly: the Mon-Sun week containing the reference date
    * - monthly: the calendar month containing the reference date
+   * - custom: the exact startDate/endDate given
    */
-  static resolvePeriodRange(period: 'daily' | 'weekly' | 'monthly', referenceDate?: string) {
+  static resolvePeriodRange(
+    period: 'daily' | 'weekly' | 'monthly' | 'custom',
+    referenceDate?: string,
+    customStart?: string,
+    customEnd?: string
+  ) {
+    if (period === 'custom') {
+      if (!customStart || !customEnd) {
+        throw new AppError('startDate and endDate are required for a custom report', 400);
+      }
+      const start = new Date(customStart);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(customEnd);
+      end.setHours(23, 59, 59, 999);
+      if (start > end) {
+        throw new AppError('startDate must be before endDate', 400);
+      }
+      return {
+        start,
+        end,
+        label: `${start.toLocaleDateString('en-CA')}_to_${end.toLocaleDateString('en-CA')}`,
+      };
+    }
+
     const ref = referenceDate ? new Date(referenceDate) : new Date();
 
     if (period === 'daily') {
@@ -271,9 +298,13 @@ export class ReportService {
     return { start, end, label: start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) };
   }
 
-  /** Builds a downloadable CSV covering a daily/weekly/monthly sales report. */
-  static async buildSalesReportCsv(period: 'daily' | 'weekly' | 'monthly', referenceDate?: string) {
-    const { start, end, label } = this.resolvePeriodRange(period, referenceDate);
+  private static async gatherReportData(
+    period: 'daily' | 'weekly' | 'monthly' | 'custom',
+    referenceDate?: string,
+    customStart?: string,
+    customEnd?: string
+  ) {
+    const { start, end, label } = this.resolvePeriodRange(period, referenceDate, customStart, customEnd);
     const startIso = start.toISOString().slice(0, 10);
     const endIso = end.toISOString().slice(0, 10);
 
@@ -282,40 +313,156 @@ export class ReportService {
       this.getProductSalesReport(startIso, endIso),
     ]);
 
-    const rows: string[] = [];
-    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const periodLabel = period === 'custom' ? 'Custom Range' : `${period[0].toUpperCase()}${period.slice(1)}`;
+    const baseFilename = `small-mart-sales-report-${period}-${startIso}${
+      period !== 'daily' ? `_to_${endIso}` : ''
+    }`;
 
-    rows.push(`Small-Mart Sales Report (${period[0].toUpperCase()}${period.slice(1)})`);
-    rows.push(`Period,${esc(label)}`);
-    rows.push(`From,${esc(startIso)}`);
-    rows.push(`To,${esc(endIso)}`);
-    rows.push('');
-    rows.push('Summary');
-    rows.push('Metric,Value');
-    rows.push(`Total Revenue,${summary.totalRevenue.toFixed(2)}`);
-    rows.push(`Estimated Gross Profit,${summary.grossProfit.toFixed(2)}`);
-    rows.push(`Total Orders,${summary.totalOrders}`);
-    rows.push(`Total Items Sold,${summary.totalItemsSold}`);
-    rows.push(`Total Discount,${summary.totalDiscount.toFixed(2)}`);
-    rows.push(`Average Order Value,${summary.averageOrderValue.toFixed(2)}`);
-    rows.push('');
-    rows.push('Daily Breakdown');
-    rows.push('Date,Sales,Orders');
+    return { summary, products, startIso, endIso, label, periodLabel, baseFilename };
+  }
+
+  /** Builds a downloadable XLSX workbook covering a daily/weekly/monthly/custom sales report. */
+  static async buildSalesReportXlsx(
+    period: 'daily' | 'weekly' | 'monthly' | 'custom',
+    referenceDate?: string,
+    customStart?: string,
+    customEnd?: string
+  ) {
+    const { summary, products, startIso, endIso, periodLabel, baseFilename } = await this.gatherReportData(
+      period,
+      referenceDate,
+      customStart,
+      customEnd
+    );
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Small-Mart POS';
+    workbook.created = new Date();
+
+    // --- Summary sheet ---
+    const summarySheet = workbook.addWorksheet('Summary');
+    summarySheet.columns = [
+      { header: 'Metric', key: 'metric', width: 30 },
+      { header: 'Value', key: 'value', width: 20 },
+    ];
+    summarySheet.getRow(1).font = { bold: true };
+    summarySheet.addRows([
+      { metric: 'Report Type', value: `${periodLabel} Sales Report` },
+      { metric: 'From', value: startIso },
+      { metric: 'To', value: endIso },
+      { metric: '', value: '' },
+      { metric: 'Total Revenue', value: summary.totalRevenue },
+      { metric: 'Estimated Gross Profit', value: summary.grossProfit },
+      { metric: 'Total Orders', value: summary.totalOrders },
+      { metric: 'Total Items Sold', value: summary.totalItemsSold },
+      { metric: 'Total Discount', value: summary.totalDiscount },
+      { metric: 'Average Order Value', value: summary.averageOrderValue },
+    ]);
+
+    // --- Daily breakdown sheet ---
+    const dailySheet = workbook.addWorksheet('Daily Breakdown');
+    dailySheet.columns = [
+      { header: 'Date', key: 'date', width: 16 },
+      { header: 'Sales', key: 'sales', width: 16 },
+      { header: 'Orders', key: 'count', width: 12 },
+    ];
+    dailySheet.getRow(1).font = { bold: true };
     for (const d of summary.dailyTrend) {
-      rows.push(`${esc(d.date)},${d.sales.toFixed(2)},${d.count}`);
-    }
-    rows.push('');
-    rows.push('Product Breakdown');
-    rows.push('Product Name,SKU,Barcode,Quantity Sold,Revenue,Estimated Profit');
-    for (const p of products) {
-      rows.push(
-        `${esc(p.productName)},${esc(p.sku)},${esc(p.barcode)},${p.totalQuantity},${p.totalRevenue.toFixed(2)},${p.estimatedProfit.toFixed(2)}`
-      );
+      dailySheet.addRow({ date: d.date, sales: d.sales, count: d.count });
     }
 
-    return {
-      csv: rows.join('\n'),
-      filename: `small-mart-sales-report-${period}-${startIso}${period !== 'daily' ? `_to_${endIso}` : ''}.csv`,
-    };
+    // --- Product breakdown sheet ---
+    const productSheet = workbook.addWorksheet('Product Breakdown');
+    productSheet.columns = [
+      { header: 'Product Name', key: 'productName', width: 32 },
+      { header: 'SKU', key: 'sku', width: 18 },
+      { header: 'Barcode', key: 'barcode', width: 18 },
+      { header: 'Quantity Sold', key: 'totalQuantity', width: 16 },
+      { header: 'Revenue', key: 'totalRevenue', width: 16 },
+      { header: 'Estimated Profit', key: 'estimatedProfit', width: 18 },
+    ];
+    productSheet.getRow(1).font = { bold: true };
+    for (const p of products) {
+      productSheet.addRow(p);
+    }
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return { buffer: Buffer.from(buffer), filename: `${baseFilename}.xlsx` };
+  }
+
+  /** Builds a downloadable PDF covering a daily/weekly/monthly/custom sales report. */
+  static async buildSalesReportPdf(
+    period: 'daily' | 'weekly' | 'monthly' | 'custom',
+    referenceDate?: string,
+    customStart?: string,
+    customEnd?: string
+  ) {
+    const { summary, products, startIso, endIso, periodLabel, baseFilename } = await this.gatherReportData(
+      period,
+      referenceDate,
+      customStart,
+      customEnd
+    );
+
+    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const chunks: Buffer[] = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+
+    const done = new Promise<Buffer>((resolve) => {
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+
+    doc.fontSize(18).font('Helvetica-Bold').text('Small-Mart Sales Report', { align: 'left' });
+    doc.fontSize(11).font('Helvetica').fillColor('#555').text(`${periodLabel} \u2014 ${startIso} to ${endIso}`);
+    doc.moveDown(1);
+
+    doc.fontSize(13).font('Helvetica-Bold').fillColor('#000').text('Summary');
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica');
+    const summaryLines: [string, string][] = [
+      ['Total Revenue', `Rs. ${summary.totalRevenue.toFixed(2)}`],
+      ['Estimated Gross Profit', `Rs. ${summary.grossProfit.toFixed(2)}`],
+      ['Total Orders', `${summary.totalOrders}`],
+      ['Total Items Sold', `${summary.totalItemsSold}`],
+      ['Total Discount', `Rs. ${summary.totalDiscount.toFixed(2)}`],
+      ['Average Order Value', `Rs. ${summary.averageOrderValue.toFixed(2)}`],
+    ];
+    for (const [label, value] of summaryLines) {
+      doc.text(`${label}:  ${value}`);
+    }
+    doc.moveDown(1);
+
+    doc.fontSize(13).font('Helvetica-Bold').text('Daily Breakdown');
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica');
+    if (summary.dailyTrend.length === 0) {
+      doc.fillColor('#888').text('No sales in this period.');
+      doc.fillColor('#000');
+    } else {
+      for (const d of summary.dailyTrend) {
+        doc.text(`${d.date}   Rs. ${d.sales.toFixed(2)}   (${d.count} orders)`);
+      }
+    }
+    doc.moveDown(1);
+
+    doc.fontSize(13).font('Helvetica-Bold').text('Product Breakdown');
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica');
+    if (products.length === 0) {
+      doc.fillColor('#888').text('No product sales in this period.');
+      doc.fillColor('#000');
+    } else {
+      for (const p of products) {
+        doc.text(
+          `${p.productName} (${p.sku})   Qty: ${p.totalQuantity}   Revenue: Rs. ${p.totalRevenue.toFixed(
+            2
+          )}   Profit: Rs. ${p.estimatedProfit.toFixed(2)}`
+        );
+      }
+    }
+
+    doc.end();
+    const buffer = await done;
+    return { buffer, filename: `${baseFilename}.pdf` };
   }
 }
