@@ -3,31 +3,38 @@ import { Sale } from '../entities/Sale.js';
 import { SaleItem } from '../entities/SaleItem.js';
 import { Product } from '../entities/Product.js';
 import { Purchase } from '../entities/Purchase.js';
-import { Category } from '../entities/Category.js';
+
+function resolveDateRange(startDate?: string, endDate?: string) {
+  const start = startDate ? new Date(startDate) : undefined;
+  if (start) start.setHours(0, 0, 0, 0);
+
+  const end = endDate ? new Date(endDate) : undefined;
+  if (end) end.setHours(23, 59, 59, 999);
+
+  return { start, end };
+}
 
 export class ReportService {
   static async getSalesReport(startDate?: string, endDate?: string) {
     const saleRepo = AppDataSource.getRepository(Sale);
+    const { start, end } = resolveDateRange(startDate, endDate);
+
     const qb = saleRepo.createQueryBuilder('sale').leftJoinAndSelect('sale.items', 'items');
+    if (start) qb.andWhere('sale.createdAt >= :start', { start });
+    if (end) qb.andWhere('sale.createdAt <= :end', { end });
 
-    if (startDate) {
-      qb.andWhere('sale.createdAt >= :startDate', { startDate: new Date(startDate) });
-    }
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      qb.andWhere('sale.createdAt <= :endDate', { endDate: end });
-    }
+    const sales = await qb.orderBy('sale.createdAt', 'ASC').getMany();
 
-    const sales = await qb.getMany();
-
-    let totalSales = 0;
+    let totalRevenue = 0;
     let totalDiscount = 0;
     let totalItemsSold = 0;
-    let estimatedProfit = 0;
+    let grossProfit = 0;
+
+    // Bucket sales by calendar day for the trend chart.
+    const trendMap = new Map<string, { sales: number; count: number }>();
 
     for (const sale of sales) {
-      totalSales += Number(sale.total);
+      totalRevenue += Number(sale.total);
       totalDiscount += Number(sale.discount || 0);
 
       if (sale.items) {
@@ -36,49 +43,63 @@ export class ReportService {
           totalItemsSold += qty;
           const revenue = Number(item.subtotal);
           const cost = Number(item.purchasePriceSnapshot || 0) * qty;
-          estimatedProfit += revenue - cost;
+          grossProfit += revenue - cost;
         }
       }
+
+      const dayKey = new Date(sale.createdAt).toISOString().slice(0, 10);
+      const bucket = trendMap.get(dayKey) || { sales: 0, count: 0 };
+      bucket.sales += Number(sale.total);
+      bucket.count += 1;
+      trendMap.set(dayKey, bucket);
     }
 
-    const numberOfBills = sales.length;
-    const averageBillValue = numberOfBills > 0 ? totalSales / numberOfBills : 0;
+    const dailyTrend = Array.from(trendMap.entries())
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([dayKey, v]) => ({
+        date: new Date(dayKey).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        sales: v.sales,
+        count: v.count,
+      }));
+
+    const totalOrders = sales.length;
+    const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
 
     return {
-      totalSales,
-      numberOfBills,
+      totalRevenue,
+      totalOrders,
       totalItemsSold,
       totalDiscount,
-      averageBillValue,
-      estimatedProfit: Math.max(0, estimatedProfit - totalDiscount),
+      averageOrderValue,
+      grossProfit: Math.max(0, grossProfit - totalDiscount),
+      dailyTrend,
       period: { startDate, endDate },
     };
   }
 
   static async getProductSalesReport(startDate?: string, endDate?: string) {
     const saleItemRepo = AppDataSource.getRepository(SaleItem);
+    const { start, end } = resolveDateRange(startDate, endDate);
+
     const qb = saleItemRepo
       .createQueryBuilder('item')
       .leftJoin('item.sale', 'sale')
+      .leftJoin('item.product', 'product')
       .select('item.productId', 'productId')
       .addSelect('item.productNameSnapshot', 'productName')
       .addSelect('item.skuSnapshot', 'sku')
-      .addSelect('SUM(item.quantity)', 'quantitySold')
+      .addSelect('product.barcode', 'barcode')
+      .addSelect('SUM(item.quantity)', 'totalQuantity')
       .addSelect('SUM(item.subtotal)', 'totalRevenue')
       .addSelect('SUM((item.unitPrice - item.purchasePriceSnapshot) * item.quantity)', 'estimatedProfit')
       .groupBy('item.productId')
       .addGroupBy('item.productNameSnapshot')
       .addGroupBy('item.skuSnapshot')
-      .orderBy('quantitySold', 'DESC');
+      .addGroupBy('product.barcode')
+      .orderBy('totalQuantity', 'DESC');
 
-    if (startDate) {
-      qb.andWhere('sale.createdAt >= :startDate', { startDate: new Date(startDate) });
-    }
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      qb.andWhere('sale.createdAt <= :endDate', { endDate: end });
-    }
+    if (start) qb.andWhere('sale.createdAt >= :start', { start });
+    if (end) qb.andWhere('sale.createdAt <= :end', { end });
 
     const rawResults = await qb.getRawMany();
 
@@ -86,7 +107,8 @@ export class ReportService {
       productId: Number(r.productId),
       productName: r.productName,
       sku: r.sku,
-      quantitySold: Number(r.quantitySold || 0),
+      barcode: r.barcode,
+      totalQuantity: Number(r.totalQuantity || 0),
       totalRevenue: Number(r.totalRevenue || 0),
       estimatedProfit: Number(r.estimatedProfit || 0),
     }));
@@ -94,6 +116,8 @@ export class ReportService {
 
   static async getCategorySalesReport(startDate?: string, endDate?: string) {
     const saleItemRepo = AppDataSource.getRepository(SaleItem);
+    const { start, end } = resolveDateRange(startDate, endDate);
+
     const qb = saleItemRepo
       .createQueryBuilder('item')
       .leftJoin('item.sale', 'sale')
@@ -101,27 +125,21 @@ export class ReportService {
       .leftJoin('product.category', 'category')
       .select('category.id', 'categoryId')
       .addSelect('category.name', 'categoryName')
-      .addSelect('SUM(item.quantity)', 'quantitySold')
+      .addSelect('SUM(item.quantity)', 'totalQuantity')
       .addSelect('SUM(item.subtotal)', 'totalRevenue')
       .groupBy('category.id')
       .addGroupBy('category.name')
       .orderBy('totalRevenue', 'DESC');
 
-    if (startDate) {
-      qb.andWhere('sale.createdAt >= :startDate', { startDate: new Date(startDate) });
-    }
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      qb.andWhere('sale.createdAt <= :endDate', { endDate: end });
-    }
+    if (start) qb.andWhere('sale.createdAt >= :start', { start });
+    if (end) qb.andWhere('sale.createdAt <= :end', { end });
 
     const rawResults = await qb.getRawMany();
 
     return rawResults.map((r) => ({
       categoryId: r.categoryId ? Number(r.categoryId) : 0,
       categoryName: r.categoryName || 'Uncategorized',
-      quantitySold: Number(r.quantitySold || 0),
+      totalQuantity: Number(r.totalQuantity || 0),
       totalRevenue: Number(r.totalRevenue || 0),
     }));
   }
@@ -133,8 +151,8 @@ export class ReportService {
       order: { stockQuantity: 'ASC' },
     });
 
-    let totalStockValuePurchase = 0;
-    let totalStockValueSelling = 0;
+    let totalInventoryCostValue = 0;
+    let totalInventorySalesValue = 0;
     let inStockCount = 0;
     let lowStockCount = 0;
     let outOfStockCount = 0;
@@ -156,8 +174,8 @@ export class ReportService {
 
       const pVal = stock * Number(p.purchasePrice || 0);
       const sVal = stock * Number(p.sellingPrice || 0);
-      totalStockValuePurchase += pVal;
-      totalStockValueSelling += sVal;
+      totalInventoryCostValue += pVal;
+      totalInventorySalesValue += sVal;
 
       return {
         id: p.id,
@@ -177,42 +195,36 @@ export class ReportService {
     });
 
     return {
-      summary: {
-        totalProducts: products.length,
-        inStockCount,
-        lowStockCount,
-        outOfStockCount,
-        totalStockValuePurchase,
-        totalStockValueSelling,
-      },
+      totalProducts: products.length,
+      inStockCount,
+      lowStockCount,
+      outOfStockCount,
+      totalInventoryCostValue,
+      totalInventorySalesValue,
       products: list,
     };
   }
 
   static async getPurchaseReport(startDate?: string, endDate?: string) {
     const purchaseRepo = AppDataSource.getRepository(Purchase);
+    const { start, end } = resolveDateRange(startDate, endDate);
+
     const qb = purchaseRepo
       .createQueryBuilder('p')
       .leftJoinAndSelect('p.supplier', 'supplier')
       .leftJoinAndSelect('p.items', 'items')
       .leftJoinAndSelect('items.product', 'product');
 
-    if (startDate) {
-      qb.andWhere('p.purchaseDate >= :startDate', { startDate: new Date(startDate) });
-    }
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      qb.andWhere('p.purchaseDate <= :endDate', { endDate: end });
-    }
+    if (start) qb.andWhere('p.purchaseDate >= :start', { start });
+    if (end) qb.andWhere('p.purchaseDate <= :end', { end });
 
     const purchases = await qb.orderBy('p.purchaseDate', 'DESC').getMany();
 
-    let totalPurchaseAmount = 0;
+    let totalPurchaseCost = 0;
     let totalItemsPurchased = 0;
 
     purchases.forEach((p) => {
-      totalPurchaseAmount += Number(p.totalAmount);
+      totalPurchaseCost += Number(p.totalAmount);
       if (p.items) {
         p.items.forEach((item) => {
           totalItemsPurchased += Number(item.quantity);
@@ -221,10 +233,89 @@ export class ReportService {
     });
 
     return {
-      totalPurchases: purchases.length,
-      totalPurchaseAmount,
+      totalOrders: purchases.length,
+      totalPurchaseCost,
       totalItemsPurchased,
       purchases,
+    };
+  }
+
+  /**
+   * Resolves a daily/weekly/monthly window around a reference date.
+   * - daily: the reference date only
+   * - weekly: the Mon-Sun week containing the reference date
+   * - monthly: the calendar month containing the reference date
+   */
+  static resolvePeriodRange(period: 'daily' | 'weekly' | 'monthly', referenceDate?: string) {
+    const ref = referenceDate ? new Date(referenceDate) : new Date();
+
+    if (period === 'daily') {
+      const start = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
+      const end = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate(), 23, 59, 59, 999);
+      return { start, end, label: start.toLocaleDateString('en-CA') };
+    }
+
+    if (period === 'weekly') {
+      const day = ref.getDay(); // 0 = Sunday
+      const diffToMonday = day === 0 ? -6 : 1 - day;
+      const start = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() + diffToMonday);
+      const end = new Date(start);
+      end.setDate(start.getDate() + 6);
+      end.setHours(23, 59, 59, 999);
+      return { start, end, label: `${start.toLocaleDateString('en-CA')}_to_${end.toLocaleDateString('en-CA')}` };
+    }
+
+    // monthly
+    const start = new Date(ref.getFullYear(), ref.getMonth(), 1);
+    const end = new Date(ref.getFullYear(), ref.getMonth() + 1, 0, 23, 59, 59, 999);
+    return { start, end, label: start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) };
+  }
+
+  /** Builds a downloadable CSV covering a daily/weekly/monthly sales report. */
+  static async buildSalesReportCsv(period: 'daily' | 'weekly' | 'monthly', referenceDate?: string) {
+    const { start, end, label } = this.resolvePeriodRange(period, referenceDate);
+    const startIso = start.toISOString().slice(0, 10);
+    const endIso = end.toISOString().slice(0, 10);
+
+    const [summary, products] = await Promise.all([
+      this.getSalesReport(startIso, endIso),
+      this.getProductSalesReport(startIso, endIso),
+    ]);
+
+    const rows: string[] = [];
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+
+    rows.push(`Small-Mart Sales Report (${period[0].toUpperCase()}${period.slice(1)})`);
+    rows.push(`Period,${esc(label)}`);
+    rows.push(`From,${esc(startIso)}`);
+    rows.push(`To,${esc(endIso)}`);
+    rows.push('');
+    rows.push('Summary');
+    rows.push('Metric,Value');
+    rows.push(`Total Revenue,${summary.totalRevenue.toFixed(2)}`);
+    rows.push(`Estimated Gross Profit,${summary.grossProfit.toFixed(2)}`);
+    rows.push(`Total Orders,${summary.totalOrders}`);
+    rows.push(`Total Items Sold,${summary.totalItemsSold}`);
+    rows.push(`Total Discount,${summary.totalDiscount.toFixed(2)}`);
+    rows.push(`Average Order Value,${summary.averageOrderValue.toFixed(2)}`);
+    rows.push('');
+    rows.push('Daily Breakdown');
+    rows.push('Date,Sales,Orders');
+    for (const d of summary.dailyTrend) {
+      rows.push(`${esc(d.date)},${d.sales.toFixed(2)},${d.count}`);
+    }
+    rows.push('');
+    rows.push('Product Breakdown');
+    rows.push('Product Name,SKU,Barcode,Quantity Sold,Revenue,Estimated Profit');
+    for (const p of products) {
+      rows.push(
+        `${esc(p.productName)},${esc(p.sku)},${esc(p.barcode)},${p.totalQuantity},${p.totalRevenue.toFixed(2)},${p.estimatedProfit.toFixed(2)}`
+      );
+    }
+
+    return {
+      csv: rows.join('\n'),
+      filename: `small-mart-sales-report-${period}-${startIso}${period !== 'daily' ? `_to_${endIso}` : ''}.csv`,
     };
   }
 }

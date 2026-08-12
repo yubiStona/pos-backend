@@ -14,5 +14,6 @@ router.get('/products', ReportController.getProductSalesReport);
 router.get('/categories', ReportController.getCategorySalesReport);
 router.get('/stock', ReportController.getStockReport);
 router.get('/purchases', ReportController.getPurchaseReport);
+router.get('/export', ReportController.exportSalesReport);
 
 export default router;

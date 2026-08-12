@@ -34,8 +34,18 @@ export class UserController {
   static async updateUser(req: AuthRequest, res: Response, next: NextFunction) {
     try {
       const id = Number(req.params.id);
-      const user = await UserService.updateUser(id, req.body);
+      const user = await UserService.updateUser(id, req.body, req.user?.id);
       res.json({ success: true, message: 'User updated successfully', data: user });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async deleteUser(req: AuthRequest, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      await UserService.deleteUser(id, req.user?.id);
+      res.json({ success: true, message: 'User deleted successfully' });
     } catch (error) {
       next(error);
     }

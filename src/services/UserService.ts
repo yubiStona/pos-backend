@@ -63,13 +63,23 @@ export class UserService {
       password?: string;
       role?: UserRole;
       isActive?: boolean;
-    }
+    },
+    currentUserId?: number
   ) {
     const userRepo = getUserRepository();
     const user = await userRepo.findOne({ where: { id } });
 
     if (!user) {
       throw new AppError('User not found', 404);
+    }
+
+    const isSelf = currentUserId !== undefined && currentUserId === id;
+
+    if (isSelf && data.isActive === false) {
+      throw new AppError('You cannot deactivate your own account', 400);
+    }
+    if (isSelf && data.role && data.role !== user.role) {
+      throw new AppError('You cannot change your own role', 400);
     }
 
     if (data.name) user.name = data.name;
@@ -85,5 +95,21 @@ export class UserService {
 
     const { password, ...result } = user;
     return result;
+  }
+
+  static async deleteUser(id: number, currentUserId?: number) {
+    const userRepo = getUserRepository();
+    const user = await userRepo.findOne({ where: { id } });
+
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
+    if (currentUserId !== undefined && currentUserId === id) {
+      throw new AppError('You cannot delete your own account', 400);
+    }
+
+    await userRepo.remove(user);
+    return { id };
   }
 }
